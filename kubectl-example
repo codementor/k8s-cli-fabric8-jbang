@@ -1,0 +1,264 @@
+#!/usr/bin/env jbang
+// when editing comment out the line above to avoid errors in IDE's.
+// Necessity to have it as kubectl don't recognize it as a script otherwise.
+// See https://github.com/kubernetes/kubectl/issues/822
+
+// client-java for k8s
+//DEPS io.fabric8:kubernetes-client:4.8.0
+// pico for cli
+//DEPS info.picocli:picocli:4.1.4
+// text output table
+//DEPS com.massisframework:j-text-utils:0.3.4
+// to quiet down log4j
+//DEPS org.slf4j:slf4j-nop:1.7.30
+
+
+import dnl.utils.text.table.TextTable;
+
+import io.fabric8.kubernetes.client.DefaultKubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.api.model.Pod;
+import io.fabric8.kubernetes.api.model.PodBuilder;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.fabric8.kubernetes.api.model.Doneable;
+import io.fabric8.kubernetes.api.model.KubernetesList;
+import io.fabric8.kubernetes.client.BaseClient;
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.dsl.Resource;
+import io.fabric8.kubernetes.client.dsl.base.BaseOperation;
+import io.fabric8.kubernetes.client.dsl.base.OperationContext;
+
+import picocli.CommandLine;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Callable;
+
+import static picocli.CommandLine.*;
+import static picocli.CommandLine.Model.*;
+
+@Command(
+        name = "example",
+        description = "An example kubectl plugin",
+        subcommands = {
+                PodCommand.class,
+                ResourcesCommand.class
+        },
+        mixinStandardHelpOptions=true
+)
+public class KubectlExample extends Base {
+
+    public static void main(String[] args) {
+        int exitCode = new CommandLine(new KubectlExample()).execute(args);
+        System.exit(exitCode);
+    }
+
+    @Override
+    public Integer call() {
+        cmd.commandLine().usage(cmd.commandLine().getOut());
+        return ExitCode.OK;
+    }
+}
+
+abstract class Base implements Callable<Integer> {
+
+    @Spec CommandSpec cmd;
+
+    java.io.PrintWriter out() {
+        return cmd.commandLine().getOut();
+    }
+    KubernetesClient client;
+
+    KubernetesClient getClient() {
+        if(client!=null) return client;
+
+        try {
+            client = new DefaultKubernetesClient();
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to get cluster configuration", e);
+        }
+        return client;
+    }
+}
+
+@Command(
+        name = "pod",
+        description = "Programmatically accesses pods in a k8s with 'add', 'list' and 'list2'",
+        mixinStandardHelpOptions = true,
+        subcommands = {
+                PodAddCommand.class,
+                PodListCommand.class
+        }
+)
+class PodCommand extends Base {
+
+    @Override
+    public Integer call() {
+        cmd.commandLine().usage(cmd.commandLine().getOut());
+        return ExitCode.USAGE;
+    }
+}
+
+
+@Command(
+        name = "add",
+        description = "Adds a pod to a k8s cluster"
+)
+class PodAddCommand extends Base {
+
+    @Parameters(index = "0")
+    String name;
+
+    @Option(names = {"-i", "--image"}, description = "image to use for pod")
+    String image = "nginx";
+
+    @Option(names = {"-n", "--namespace"}, description = "namespace to use for pod")
+    String namespace = "default";
+
+    @Override
+    public Integer call() {
+        try {
+            KubernetesClient kc = getClient();
+
+            final Map<String, String> labels = new HashMap<>();
+            labels.put("app", "demo");
+            final Pod pod = new PodBuilder()
+                .withNewMetadata()
+                .withName(name)
+                .withLabels(labels)
+                .endMetadata()
+                .withNewSpec()
+                .addNewContainer()
+                .withName(name)
+                .withImage(image)
+                .endContainer()
+                .endSpec()
+                .build();
+            kc.pods().inNamespace(namespace).create(pod);
+            return ExitCode.OK;
+
+        } catch (Exception e) {
+            throw new IllegalStateException("unable to get pod list", e);
+        }
+
+    }
+}
+
+/**
+ * PodListCommand is a command for listing pods in a kubernetes cluster.  This class is an example and requires
+ * standard kubeconfig setup to work.
+ *
+ */
+@Command(
+        name = "list",
+        description = "lists pods in the cluster using a structured approach"
+)
+class PodListCommand extends Base {
+
+    @Override
+    public Integer call() {
+        KubernetesClient kc = getClient();
+        final List<Pod> list = kc.pods().list().getItems();
+        if (list.isEmpty()) {
+            System.out.println("No Pods found");
+        } else {
+            printTable(list);
+        }
+
+        return ExitCode.OK;
+    }
+
+    /**
+     * Prints the table of pods discovered
+     *
+     * @param list of pods
+     */
+    private static void printTable(List<Pod> list) {
+      final Object[][] tableData = list.stream()
+          .map(pod -> new Object[]{
+              pod.getMetadata().getName(),
+              pod.getMetadata().getNamespace()
+          })
+          .toArray(Object[][]::new);
+      String[] columnNames = {"Pod Name", "namespace"};
+      new TextTable(columnNames, tableData).printTable();
+    }
+}
+
+@Command(
+        name = "resources",
+        description = "lists resources in the k8s cluster"
+)
+class ResourcesCommand extends Base {
+
+    @Override
+    public Integer call() {
+
+        KubernetesClient kc = getClient();
+        final APIResourceList resourceList = new APIResourceListOperation((BaseClient)kc).list();
+        if (resourceList.resources.isEmpty()) {
+            System.out.println("No resources found");
+        } else {
+            printTable(resourceList.resources);
+        }
+
+        return ExitCode.OK;
+    }
+
+    private void printTable(List<APIResource> resources) {
+      final Object[][] data = resources.stream()
+          .map(apiResource -> new Object[]{
+              apiResource.name,
+              apiResource.namespaced,
+              apiResource.kind
+          })
+          .toArray(Object[][]::new);
+      final String[] columnNames = {"Resource", "Namespaced", "Kind"};
+      new TextTable(columnNames, data).printTable();
+    }
+
+    /**
+     * Temporary work-around to allow query api-resources
+     * (current fabric8io/kubernetes-client doesn't have this in the model)
+     */
+    public static class APIResourceListOperation
+        extends BaseOperation<APIResource, APIResourceList, Doneable<APIResource>, Resource<APIResource, Doneable<APIResource>>> {
+
+        public APIResourceListOperation(BaseClient kc) {
+            super(new OperationContext()
+                .withConfig(kc.getConfiguration())
+                .withOkhttpClient(kc.getHttpClient())
+                .withPlural(""));
+
+            this.apiVersion = "v1";
+            this.type = APIResource.class;
+            this.listType = APIResourceList.class;
+        }
+
+        @Override
+        public boolean isResourceNamespaced() {
+            return false;
+        }
+    }
+
+    public static class APIResourceList extends KubernetesList {
+        @JsonProperty("resources")
+        private List<APIResource> resources;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class APIResource {
+        @JsonProperty("name")
+        private String name;
+        @JsonProperty("singularName")
+        private String singularName;
+        @JsonProperty("namespaced")
+        private Boolean namespaced;
+        @JsonProperty("kind")
+        private String kind;
+    }
+}
